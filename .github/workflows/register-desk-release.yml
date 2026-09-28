@@ -1,0 +1,100 @@
+name: Register HeroFlow Desk release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example desk-v2026.0.0.2"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  register-release:
+    runs-on: ubuntu-latest
+
+    env:
+      SUPABASE_URL: https://mjgoirjpnxeswgbxrgtx.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+
+    steps:
+      - name: Download release installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$RELEASE_TAG" != desk-v* ]]; then
+            echo "This workflow only accepts Desk tags."
+            exit 1
+          fi
+
+          VERSION="${RELEASE_TAG#desk-v}"
+          ASSET="HeroFlow-Desk-Installer.exe"
+
+          mkdir -p release-assets
+
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$ASSET" \
+            --dir release-assets
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+
+      - name: Calculate SHA256 and file size
+        run: |
+          FILE="release-assets/$ASSET"
+
+          SHA256=$(sha256sum "$FILE" | cut -d ' ' -f 1)
+          FILE_SIZE=$(stat -c%s "$FILE")
+          INSTALLER_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$ASSET"
+
+          echo "SHA256=$SHA256"
+          echo "FILE_SIZE=$FILE_SIZE"
+
+          echo "SHA256=$SHA256" >> "$GITHUB_ENV"
+          echo "FILE_SIZE=$FILE_SIZE" >> "$GITHUB_ENV"
+          echo "INSTALLER_URL=$INSTALLER_URL" >> "$GITHUB_ENV"
+
+      - name: Register release in Supabase
+        run: |
+          PAYLOAD=$(jq -n \
+            --arg product "heroflow-desk" \
+            --arg version "$VERSION" \
+            --arg channel "stable" \
+            --arg platform "windows" \
+            --arg architecture "x64" \
+            --arg installer_url "$INSTALLER_URL" \
+            --arg sha256 "$SHA256" \
+            --argjson file_size_bytes "$FILE_SIZE" \
+            '{
+              product: $product,
+              version: $version,
+              channel: $channel,
+              platform: $platform,
+              architecture: $architecture,
+              installer_url: $installer_url,
+              sha256: $sha256,
+              file_size_bytes: $file_size_bytes,
+              mandatory: false,
+              release_notes: [
+                {
+                  title: "HeroFlow Desk update",
+                  description: "New HeroFlow Desk release.",
+                  icon: "performance"
+                }
+              ],
+              is_published: true
+            }')
+
+          curl --fail-with-body \
+            -X POST "$SUPABASE_URL/rest/v1/desktop_releases?on_conflict=product,version,channel,platform,architecture" \
+            -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: resolution=merge-duplicates,return=minimal" \
+            -d "$PAYLOAD"
